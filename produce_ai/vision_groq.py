@@ -29,14 +29,10 @@ log = logging.getLogger("ripe-and-ready.groq")
 
 MODEL = "qwen/qwen3.8-27b"
 
-# Project root:
-# C:\produce-scanner-ai\.env
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 
-# IMPORTANT:
-# override=True ensures the .env value is used even if the hosting
-# platform already has a GROQ_API_KEY environment variable.
+# Load the .env file and allow it to override an existing environment value.
 load_dotenv(ENV_FILE, override=True)
 
 
@@ -50,11 +46,10 @@ class GroqVisionEngine:
     provider = "groq"
 
     def __init__(self):
-        # Load again here so this class is safe even when imported by
-        # a separate web worker/process.
+        # Reload the environment inside the actual worker process.
         load_dotenv(ENV_FILE, override=True)
 
-        from groq import Groq
+        from groq import Groq, DefaultHttpxClient
 
         api_key = os.getenv("GROQ_API_KEY", "").strip()
 
@@ -68,11 +63,42 @@ class GroqVisionEngine:
                 "GROQ_API_KEY is not a valid Groq key format."
             )
 
-        self.client = Groq(
-            api_key=api_key,
-            timeout=60.0,
-            max_retries=2,
-        )
+        client_kwargs = {
+            "api_key": api_key,
+            "timeout": 60.0,
+            "max_retries": 2,
+        }
+
+        # --------------------------------------------------------
+        # PythonAnywhere free accounts
+        # --------------------------------------------------------
+        #
+        # PythonAnywhere routes outbound internet traffic through
+        # its proxy. The Groq SDK uses HTTPX, so explicitly provide
+        # that proxy when running on PythonAnywhere.
+        #
+        # Your local Windows environment will continue to connect
+        # directly to Groq.
+        # --------------------------------------------------------
+
+        if os.getenv("PYTHONANYWHERE_SITE"):
+            proxy = (
+                os.getenv("https_proxy")
+                or os.getenv("HTTPS_PROXY")
+                or os.getenv("http_proxy")
+                or os.getenv("HTTP_PROXY")
+                or "http://proxy.server:3128"
+            )
+
+            log.info(
+                "PythonAnywhere detected. Using outbound HTTP proxy."
+            )
+
+            client_kwargs["http_client"] = DefaultHttpxClient(
+                proxy=proxy
+            )
+
+        self.client = Groq(**client_kwargs)
 
         log.info(
             "Groq vision engine initialized using model %s",
@@ -86,15 +112,17 @@ class GroqVisionEngine:
     @staticmethod
     def _encode_image(pil: Image.Image) -> str:
         """
-        Convert an uploaded image to a compact JPEG base64 string.
+        Convert uploaded image to a compact JPEG base64 string.
         """
 
         if not isinstance(pil, Image.Image):
-            raise ValueError("Invalid image supplied to vision engine.")
+            raise ValueError(
+                "Invalid image supplied to vision engine."
+            )
 
         image = pil.convert("RGB").copy()
 
-        # Keep requests comfortably below Groq's image request limit.
+        # Keep the request compact.
         image.thumbnail((1024, 1024))
 
         buffer = io.BytesIO()
@@ -106,11 +134,9 @@ class GroqVisionEngine:
             optimize=True,
         )
 
-        encoded = base64.b64encode(
+        return base64.b64encode(
             buffer.getvalue()
         ).decode("utf-8")
-
-        return encoded
 
     # ============================================================
     # GROQ REQUEST
@@ -124,8 +150,8 @@ class GroqVisionEngine:
         """
         Send a multimodal request to Groq.
 
-        The actual exception is logged server-side for debugging,
-        while users receive a safe generic message.
+        The real exception is written to the server log while a
+        safe message is returned to the user.
         """
 
         try:
@@ -366,7 +392,7 @@ Rules:
         )
 
         # Automatic identification:
-        # reuse the stage probabilities from the same vision call.
+        # reuse the stage probabilities from the same AI call.
         if identified_key == key:
             probs = self._normalise_probs(
                 analysis.get("stage_probs")
@@ -376,7 +402,8 @@ Rules:
                 return probs
 
         # Manual produce selection:
-        # ask Groq specifically about the chosen item.
+        # perform a second vision request specifically for the
+        # selected produce.
         image_b64 = feat["_image_b64"]
 
         item = PRODUCE[key]
