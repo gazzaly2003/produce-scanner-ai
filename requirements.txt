@@ -4,9 +4,16 @@ python-multipart>=0.0.9
 pillow>=10.0
 numpy>=1.24
 opencv-python-headless>=4.8
-# --- AI vision (CLIP). Install torch first, see README ---
-torch>=2.1
-transformers>=4.40,<5
-# --- optional: only for train_probe.py ---
-scikit-learn>=1.3
-joblib>=1.3
+
+# Cloud AI vision
+groq
+python-dotenv
+
+# Optional local CLIP for your Windows development machine.
+# Not required by the PythonAnywhere deployment.
+# torch>=2.1
+# transformers>=4.40,<5
+
+# Optional training tools
+# scikit-learn>=1.3
+# joblib>=1.3
