@@ -32,7 +32,7 @@ MODEL = "qwen/qwen3.8-27b"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 
-# Load the .env file and allow it to override an existing environment value.
+# Load .env values.
 load_dotenv(ENV_FILE, override=True)
 
 
@@ -46,7 +46,7 @@ class GroqVisionEngine:
     provider = "groq"
 
     def __init__(self):
-        # Reload the environment inside the actual worker process.
+        # Re-load environment inside the actual process/worker.
         load_dotenv(ENV_FILE, override=True)
 
         from groq import Groq, DefaultHttpxClient
@@ -69,39 +69,58 @@ class GroqVisionEngine:
             "max_retries": 2,
         }
 
-        # --------------------------------------------------------
-        # PythonAnywhere free accounts
-        # --------------------------------------------------------
+        # ========================================================
+        # PYTHONANYWHERE OUTBOUND PROXY
+        # ========================================================
         #
-        # PythonAnywhere routes outbound internet traffic through
-        # its proxy. The Groq SDK uses HTTPX, so explicitly provide
-        # that proxy when running on PythonAnywhere.
+        # PythonAnywhere free accounts route external HTTP/HTTPS
+        # traffic through proxy.server:3128.
         #
-        # Your local Windows environment will continue to connect
-        # directly to Groq.
-        # --------------------------------------------------------
+        # The web worker provides DOMAIN_SOCKET, so use that to
+        # detect the ASGI environment.
+        #
+        # We also check common PythonAnywhere environment variables
+        # in case the platform already provides a proxy URL.
+        # ========================================================
 
-        if os.getenv("PYTHONANYWHERE_SITE"):
+        running_on_pythonanywhere = bool(
+            os.getenv("DOMAIN_SOCKET")
+            or os.getenv("PYTHONANYWHERE_SITE")
+        )
+
+        if running_on_pythonanywhere:
             proxy = (
                 os.getenv("https_proxy")
                 or os.getenv("HTTPS_PROXY")
                 or os.getenv("http_proxy")
                 or os.getenv("HTTP_PROXY")
                 or "http://proxy.server:3128"
+            ).strip()
+
+            log.info(
+                "PythonAnywhere detected. Configuring Groq "
+                "through outbound proxy."
             )
 
             log.info(
-                "PythonAnywhere detected. Using outbound HTTP proxy."
+                "Groq proxy configured: %s",
+                proxy,
             )
 
             client_kwargs["http_client"] = DefaultHttpxClient(
                 proxy=proxy
             )
 
+        else:
+            log.info(
+                "Running outside PythonAnywhere. "
+                "Using direct Groq connection."
+            )
+
         self.client = Groq(**client_kwargs)
 
         log.info(
-            "Groq vision engine initialized using model %s",
+            "Groq vision engine initialized. Model=%s",
             MODEL,
         )
 
@@ -112,7 +131,7 @@ class GroqVisionEngine:
     @staticmethod
     def _encode_image(pil: Image.Image) -> str:
         """
-        Convert uploaded image to a compact JPEG base64 string.
+        Convert uploaded image into a compact JPEG base64 string.
         """
 
         if not isinstance(pil, Image.Image):
@@ -122,7 +141,7 @@ class GroqVisionEngine:
 
         image = pil.convert("RGB").copy()
 
-        # Keep the request compact.
+        # Keep request size small enough for cloud vision.
         image.thumbnail((1024, 1024))
 
         buffer = io.BytesIO()
@@ -134,9 +153,11 @@ class GroqVisionEngine:
             optimize=True,
         )
 
-        return base64.b64encode(
+        encoded = base64.b64encode(
             buffer.getvalue()
         ).decode("utf-8")
+
+        return encoded
 
     # ============================================================
     # GROQ REQUEST
@@ -149,9 +170,6 @@ class GroqVisionEngine:
     ) -> dict[str, Any]:
         """
         Send a multimodal request to Groq.
-
-        The real exception is written to the server log while a
-        safe message is returned to the user.
         """
 
         try:
@@ -207,9 +225,9 @@ class GroqVisionEngine:
                 )
 
             try:
-                parsed = json.loads(content)
+                result = json.loads(content)
             except json.JSONDecodeError as exc:
-                log.exception(
+                log.error(
                     "Groq returned invalid JSON: %s",
                     content[:500],
                 )
@@ -217,14 +235,16 @@ class GroqVisionEngine:
                     "Groq returned invalid JSON."
                 ) from exc
 
-            if not isinstance(parsed, dict):
+            if not isinstance(result, dict):
                 raise RuntimeError(
-                    "Groq returned a non-object JSON response."
+                    "Groq returned a non-object response."
                 )
 
-            return parsed
+            return result
 
         except Exception as exc:
+            # Keep the real error in the server log.
+            # Never expose the API key to the user.
             log.exception(
                 "Groq vision request failed: %s: %s",
                 type(exc).__name__,
@@ -392,7 +412,7 @@ Rules:
         )
 
         # Automatic identification:
-        # reuse the stage probabilities from the same AI call.
+        # reuse the probabilities from the same vision request.
         if identified_key == key:
             probs = self._normalise_probs(
                 analysis.get("stage_probs")
@@ -402,8 +422,7 @@ Rules:
                 return probs
 
         # Manual produce selection:
-        # perform a second vision request specifically for the
-        # selected produce.
+        # perform a second vision request.
         image_b64 = feat["_image_b64"]
 
         item = PRODUCE[key]
